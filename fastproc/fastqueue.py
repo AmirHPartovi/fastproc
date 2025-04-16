@@ -7,7 +7,6 @@ a circular import conflict with Python's built-in queue module.
 
 from __future__ import annotations
 import sys
-import os
 import threading
 import collections
 import time
@@ -16,14 +15,13 @@ import logging
 import queue as std_queue  # Standard library queue for Empty and Full exceptions
 from typing import Any, Optional, Deque, TypeVar, Callable, Generic
 from dataclasses import dataclass
-from multiprocessing import Pipe, get_context
+from multiprocessing import (
+    Pipe,
+    get_context,
+)
 from multiprocessing.util import Finalize, is_exiting, register_after_fork
 from threading import Condition
-from multiprocessing import get_context 
-from multiprocessing.synchronize import Lock
-from multiprocessing import Pipe
-from multiprocessing import SimpleQueue as StdSimpleQueue
-from multiprocessing import Queue as StdQueue
+from multiprocessing.context import BaseContext
 
 
 T = TypeVar('T')
@@ -33,7 +31,6 @@ logging.basicConfig(level=logging.DEBUG)
 
 # Obtain the default context and use it to create synchronization primitives
 _ctx = get_context()
-
 
 
 @dataclass
@@ -53,7 +50,15 @@ class Queue(Generic[T]):
     A process-safe FIFO queue with enhanced performance.
     """
 
-    def __init__(self, maxsize: int = 0):
+    def __init__(self, maxsize: int = 0, ctx: Optional[BaseContext] = None):
+        self._ctx = ctx or get_context('spawn')
+        self._maxsize = maxsize
+        self._lock = self._ctx.Lock()  # Use multiprocessing Lock
+        self._data: collections.deque[T] = collections.deque()
+        # Use a smaller value for semaphore initialization
+        self._sem = self._ctx.Semaphore(
+            min(maxsize, 32767) if maxsize > 0 else 32767)
+
         if maxsize <= 0:
             maxsize = 2 ** 31 - 1  # Use a very large number for unlimited size
 
@@ -68,7 +73,6 @@ class Queue(Generic[T]):
         self._reader, self._writer = Pipe(duplex=False)
         self._rlock = _ctx.Lock()
         self._wlock = None if sys.platform == 'win32' else _ctx.Lock()
-        self._sem = _ctx.Semaphore(maxsize)
         self._notempty = threading.Condition(threading.Lock())
         self._after_fork()
 
