@@ -1,0 +1,13 @@
+[project]
+name = "fastproc"
+version = "0.1.0"
+description = "A modern, high-performance multiprocessing framework for Python"
+authors = [{ name="Your Name", email="your@email.com" }]
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = "."
