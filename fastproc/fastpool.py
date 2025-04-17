@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import concurrent.futures
 from multiprocessing import get_context
 from multiprocessing.context import BaseContext
+from multiprocessing import Queue as MPQueue
 from queue import Queue
 
 # Type variables
@@ -97,8 +98,9 @@ class Pool:
 
         # Create queues using the context
         self._taskqueue: Queue = Queue()
-        self._inqueue: Queue = Queue()
-        self._outqueue: Queue = Queue()
+
+        self._inqueue: MPQueue = self._ctx.Queue()
+        self._outqueue: MPQueue = self._ctx.Queue()
 
         # Initialize other attributes
         self._state = PoolState.RUN
@@ -128,8 +130,12 @@ class Pool:
             w.start()
 
         # Start task and result handlers
-        self._handle_tasks()
-        self._handle_results()
+        self._task_thread = threading.Thread(
+            target=self._distribute_tasks, daemon=True)
+        self._result_thread = threading.Thread(
+            target=self._collect_results, daemon=True)
+        self._task_thread.start()
+        self._result_thread.start()
 
     def _handle_tasks(self):
         """Start a thread to handle task distribution to workers."""
@@ -274,9 +280,15 @@ class Pool:
 
     def close(self) -> None:
         """Close the pool."""
-        if self._state == PoolState.RUN:
-            self._state = PoolState.CLOSE
-            self._taskqueue.put(None)
+        if self._state != PoolState.RUN:
+            return
+        self._state = PoolState.CLOSE
+        # Signal threads to exit
+        self._taskqueue.put(None)
+        self._inqueue.put(None)
+        # Wait for threads
+        self._task_thread.join()
+        self._result_thread.join()
 
     def terminate(self) -> None:
         """Terminate the pool immediately."""
@@ -295,21 +307,23 @@ class Pool:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.terminate()
+       # close normally, wait for in‑flight tasks and threads
+        self.close()
+        self.join()
 
     def _setup_queues(self) -> None:
         """Set up the task and result queues."""
-        self._inqueue = Queue()
-        self._outqueue = Queue()
+
         self._quick_put = self._inqueue.put
         self._quick_get = self._outqueue.get
 
     def _calculate_chunksize(self, iterable: Iterator) -> int:
         """Calculate size of chunks for iterator."""
-        try:
-            length = len(list(iterable))
-        except (TypeError, AttributeError):
-            length = 0
+        # only compute length if the iterable is a Sized collection
+        if hasattr(iterable, "__len__"):
+            length = len(list(iterable))  # safe
+        else:
+            return 1  # fallback: 1-per-task
         chunksize, extra = divmod(length, len(self._pool) * 4)
         return chunksize + 1 if extra else chunksize
 
