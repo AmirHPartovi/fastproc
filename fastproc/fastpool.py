@@ -11,7 +11,7 @@ import itertools
 from typing import Any, Optional, Callable, Iterator, TypeVar, Generic
 from dataclasses import dataclass
 import concurrent.futures
-from multiprocessing import get_context
+from multiprocessing import get_context, cpu_count
 from multiprocessing.context import BaseContext
 from multiprocessing import Queue as MPQueue
 from queue import Queue
@@ -31,7 +31,26 @@ class PoolState:
     CLOSE = 1
     TERMINATE = 2
 
+# Module‑level worker
 
+
+def _module_worker(inq, outq, initializer, initargs, maxtasks):
+    """Picklable worker loop."""
+    if initializer is not None:
+        initializer(*initargs)
+    completed = 0
+    while maxtasks is None or completed < maxtasks:
+        task = inq.get()
+        if task is None:
+            break
+        job_id, index, func, args, kwargs = task
+        try:
+            res = TaskResult(True, func(*args, **kwargs), job_id, index)
+        except Exception as e:
+            res = TaskResult(False, e, job_id, index)
+        outq.put(res)
+        completed += 1
+        
 @dataclass
 class TaskResult(Generic[T]):
     """Represents the result of a task execution."""
@@ -93,41 +112,31 @@ class Pool:
         context: Any = None
     ):
         """Initialize the pool with the given parameters."""
-        self._ctx: BaseContext = context or get_context('spawn')
-        self._processes = processes or self._ctx.cpu_count()
-
-        # Create queues using the context
-        self._taskqueue: Queue = Queue()
-
-        self._inqueue: MPQueue = self._ctx.Queue()
-        self._outqueue: MPQueue = self._ctx.Queue()
-
-        # Initialize other attributes
-        self._state = PoolState.RUN
-        self._cache: dict[int, AsyncResult] = {}
+        self._ctx = context or get_context()
+        self._processes = processes or cpu_count()
         self._initializer = initializer
         self._initargs = initargs
-        self._maxtasksperchild = maxtasksperchild
-
-        # Set up input and output queues
+        self._maxtasks = maxtasksperchild
+        self._state = PoolState.RUN
+        self._cache: dict[int, AsyncResult[Any]] = {}
+        # use multiprocessing queues
+        self._inqueue = self._ctx.Queue()
+        self._outqueue = self._ctx.Queue()
+        self._taskqueue = self._ctx.Queue()
         self._quick_put = self._inqueue.put
         self._quick_get = self._outqueue.get
-
-        # Start worker processes
+        # spawn workers with module‑level function
         self._pool = []
         for _ in range(self._processes):
-            w = self._ctx.Process(
-                target=self._worker,
-                args=(
-                    self._inqueue,
-                    self._outqueue,
-                    initializer,
-                    initargs,
-                    maxtasksperchild
-                )
+            p = self._ctx.Process(
+                target=_module_worker,
+                args=(self._inqueue, self._outqueue,
+                      self._initializer, self._initargs,
+                      self._maxtasks)
             )
-            self._pool.append(w)
-            w.start()
+            p.daemon = True
+            p.start()
+            self._pool.append(p)
 
         # Start task and result handlers
         self._task_thread = threading.Thread(
